@@ -65,7 +65,8 @@ import {
   TradeOpportunitySideAnalysis
 } from '../lib/marketSignalEngine';
 
-export type ChartTimeframe = '1H' | '4H' | '1D' | '7D' | '1M';
+export type ChartTimeframe = '1H' | '4H' | '6H' | '12H' | '1D' | '3D' | '7D' | '1M';
+export type ChartStyleMode = 'candles' | 'area';
 
 interface TradeableOrderBookModalProps {
   itemId: number;
@@ -76,6 +77,7 @@ interface TradeableOrderBookModalProps {
   flowerPriceUSD?: number;
   farm?: FarmState;
   onNavigate?: (tab: string) => void;
+  initialTab?: 'depth' | 'signals' | 'overview' | 'orderbook' | 'sales' | 'analytics';
 }
 
 export type ChartAnalysisMode = 'price' | 'depth' | 'pressure' | 'volume';
@@ -84,11 +86,18 @@ interface ChartDataPoint {
   timestamp: number;
   timeLabel: string;
   fullDateLabel: string;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
   salePrice: number;
   floorAsk: number;
   bestBid: number;
   vwap: number;
   movingAverage: number;
+  ema: number;
+  upperBand: number;
+  lowerBand: number;
   source: string;
   isRealSale: boolean;
   volume: number;
@@ -106,11 +115,14 @@ export default function TradeableOrderBookModal({
   flowerPriceUSD = SFL_TOKEN_PRICE_USD,
   farm,
   onNavigate,
+  initialTab = 'depth',
 }: TradeableOrderBookModalProps) {
   const [data, setData] = useState<any>(null);
+  const [storedSnapshots, setStoredSnapshots] = useState<any[]>([]);
   const [isLoading, setIsLoading] = useState<boolean>(true);
-  const [activeTab, setActiveTab] = useState<'depth' | 'signals' | 'overview' | 'orderbook' | 'sales' | 'analytics'>('depth');
+  const [activeTab, setActiveTab] = useState<'depth' | 'signals' | 'overview' | 'orderbook' | 'sales' | 'analytics'>(initialTab);
   const [chartMode, setChartMode] = useState<ChartAnalysisMode>('price');
+  const [chartStyle, setChartStyle] = useState<ChartStyleMode>('candles');
   const [timeframe, setTimeframe] = useState<ChartTimeframe>('1D');
   const [error, setError] = useState<string | null>(null);
 
@@ -118,15 +130,17 @@ export default function TradeableOrderBookModal({
   const [showSignalGuide, setShowSignalGuide] = useState<boolean>(false);
   const [showScoreBreakdown, setShowScoreBreakdown] = useState<boolean>(false);
 
-  // Multi-Indicator Overlay Toggles (only core price series active by default to prevent visual clutter)
+  // Multi-Indicator Overlay Toggles (clean institutional defaults)
   const [showSales, setShowSales] = useState<boolean>(true);
   const [showAsks, setShowAsks] = useState<boolean>(true);
   const [showBids, setShowBids] = useState<boolean>(true);
-  const [showVwap, setShowVwap] = useState<boolean>(false);
+  const [showVwap, setShowVwap] = useState<boolean>(true);
   const [showMovingAverage, setShowMovingAverage] = useState<boolean>(false);
+  const [showEma, setShowEma] = useState<boolean>(true);
+  const [showBands, setShowBands] = useState<boolean>(false);
   const [showSupportResistance, setShowSupportResistance] = useState<boolean>(false);
   const [showPressureOverlay, setShowPressureOverlay] = useState<boolean>(false);
-  const [showVolumeOverlay, setShowVolumeOverlay] = useState<boolean>(false);
+  const [showVolumeOverlay, setShowVolumeOverlay] = useState<boolean>(true);
 
   // Hover state for interactive price trend chart
   const [hoveredIndex, setHoveredIndex] = useState<number | null>(null);
@@ -159,7 +173,13 @@ export default function TradeableOrderBookModal({
     setIsLoading(true);
     setError(null);
     try {
-      const result = await fetchTradeableItem(itemId, collection);
+      const [result, snapshots] = await Promise.all([
+        fetchTradeableItem(itemId, collection),
+        fetchMarketPriceSnapshots(String(itemId), 240).catch(() => []),
+      ]);
+      if (Array.isArray(snapshots)) {
+        setStoredSnapshots(snapshots);
+      }
       if (result && !result.error) {
         setData(result);
 
@@ -459,22 +479,31 @@ export default function TradeableOrderBookModal({
     setHoveredDepthPoint(closest);
   };
 
-  // 6. Multi-Timeframe Price Trend Points Generator
+  // 6. Multi-Timeframe OHLC & Price Trend Generator (Real Sales + Snapshots + Daily OHLC)
   const chartPoints: ChartDataPoint[] = useMemo(() => {
     const points: ChartDataPoint[] = [];
     const now = Date.now();
 
     let windowMs = 24 * 60 * 60 * 1000;
-    let stepCount = 20;
+    let stepCount = 24;
 
     if (timeframe === '1H') {
       windowMs = 60 * 60 * 1000;
-      stepCount = 12;
+      stepCount = 16;
     } else if (timeframe === '4H') {
       windowMs = 4 * 60 * 60 * 1000;
-      stepCount = 16;
+      stepCount = 24;
+    } else if (timeframe === '6H') {
+      windowMs = 6 * 60 * 60 * 1000;
+      stepCount = 24;
+    } else if (timeframe === '12H') {
+      windowMs = 12 * 60 * 60 * 1000;
+      stepCount = 24;
     } else if (timeframe === '1D') {
       windowMs = 24 * 60 * 60 * 1000;
+      stepCount = 24;
+    } else if (timeframe === '3D') {
+      windowMs = 3 * 24 * 60 * 60 * 1000;
       stepCount = 24;
     } else if (timeframe === '7D') {
       windowMs = 7 * 24 * 60 * 60 * 1000;
@@ -484,100 +513,256 @@ export default function TradeableOrderBookModal({
       stepCount = 30;
     }
 
-    const stepMs = windowMs / (stepCount - 1);
+    const stepMs = windowMs / Math.max(1, stepCount - 1);
     const startTime = now - windowMs;
-
-    const chronSales = [...sales].sort((a: any, b: any) => (a.fulfilledAt || 0) - (b.fulfilledAt || 0));
 
     const baseSale = lastSaleUnitFlower || floorUnitFlower || 0.01;
     const baseFloor = floorUnitFlower || baseSale;
     const baseBid = bestOfferUnitFlower || baseFloor * 0.98;
+    const defaultSpreadRatio = baseFloor > 0 && baseBid > 0 ? Math.max(1.002, baseFloor / baseBid) : 1.02;
 
-    const rawPoints: Omit<ChartDataPoint, 'vwap' | 'movingAverage'>[] = [];
+    const chronSales = [...sales]
+      .filter((s: any) => Number(s.fulfilledAt) > 0 && Number(s.sfl) > 0 && (Number(s.quantity) || 0) > 0)
+      .map((s: any) => ({
+        ...s,
+        ts: Number(s.fulfilledAt),
+        unitPrice: Number(s.sfl) / (Number(s.quantity) || 1),
+      }))
+      .sort((a: any, b: any) => a.ts - b.ts);
+
+    const parsedSnapshots = [...storedSnapshots]
+      .map((snap: any) => {
+        const ts = snap?.recorded_at ? new Date(snap.recorded_at).getTime() : 0;
+        const sale = Number(snap?.last_sale || snap?.price_flower || 0);
+        const floor = Number(snap?.floor_ask || snap?.price_flower || sale || 0);
+        const bid = Number(snap?.best_bid || (floor > 0 ? floor * 0.96 : 0));
+        return { ts, sale, floor, bid, vol: Number(snap?.volume_24h || 0) };
+      })
+      .filter(s => s.ts > 0 && (s.sale > 0 || s.floor > 0))
+      .sort((a, b) => a.ts - b.ts);
+
+    const parsedDaily = Object.entries(dailyHistory || {})
+      .map(([dateStr, d]: [string, any]) => {
+        const ts = new Date(`${dateStr}T12:00:00Z`).getTime();
+        const low = Number(d?.low || d?.high || 0);
+        const high = Number(d?.high || d?.low || 0);
+        const mid = low > 0 && high > 0 ? (low + high) / 2 : low || high || 0;
+        return {
+          dateStr,
+          ts,
+          low: low || mid,
+          high: high || mid,
+          mid,
+          volume: Number(d?.volume || 0),
+          sales: Number(d?.sales || 0),
+        };
+      })
+      .filter(d => Number.isFinite(d.ts) && d.mid > 0)
+      .sort((a, b) => a.ts - b.ts);
+
+    // Chronological anchor timeline fusing snapshots, daily OHLC, settled sales, and current spot tick
+    const anchors: { ts: number; price: number; floor: number; bid: number; high: number; low: number; source: string }[] = [
+      ...parsedDaily.map(d => ({
+        ts: d.ts,
+        price: d.mid,
+        floor: Number((d.high || d.mid).toFixed(6)),
+        bid: Number(((d.low || d.mid) * 0.985).toFixed(6)),
+        high: d.high || d.mid,
+        low: d.low || d.mid,
+        source: 'Daily OHLC History',
+      })),
+      ...parsedSnapshots.map(s => ({
+        ts: s.ts,
+        price: s.sale || s.floor,
+        floor: s.floor || s.sale,
+        bid: s.bid || (s.floor || s.sale) * 0.97,
+        high: Math.max(s.sale, s.floor),
+        low: Math.min(s.sale || s.floor, s.bid || s.sale || s.floor),
+        source: 'Stored Market Snapshot',
+      })),
+      ...chronSales.map(s => ({
+        ts: s.ts,
+        price: s.unitPrice,
+        floor: Math.max(s.unitPrice, s.unitPrice * 1.008),
+        bid: Math.min(s.unitPrice, s.unitPrice * 0.988),
+        high: s.unitPrice,
+        low: s.unitPrice,
+        source: 'Verified FLOWER Settlement',
+      })),
+      {
+        ts: now,
+        price: baseSale,
+        floor: baseFloor,
+        bid: baseBid,
+        high: Math.max(baseSale, baseFloor),
+        low: Math.min(baseSale, baseBid),
+        source: 'Live Order Book Tick',
+      },
+    ].sort((a, b) => a.ts - b.ts);
+
+    const interpolateAt = (ts: number) => {
+      let prev = anchors[0];
+      let next = anchors[anchors.length - 1];
+      for (let k = 0; k < anchors.length; k++) {
+        if (anchors[k].ts <= ts) prev = anchors[k];
+        if (anchors[k].ts >= ts) {
+          next = anchors[k];
+          break;
+        }
+      }
+      if (!prev && !next) {
+        return { price: baseSale, floor: baseFloor, bid: baseBid };
+      }
+      if (!prev) return { price: next.price, floor: next.floor, bid: next.bid };
+      if (!next || next.ts === prev.ts) return { price: prev.price, floor: prev.floor, bid: prev.bid };
+      const t = Math.max(0, Math.min(1, (ts - prev.ts) / (next.ts - prev.ts)));
+      return {
+        price: Number((prev.price + (next.price - prev.price) * t).toFixed(6)),
+        floor: Number((prev.floor + (next.floor - prev.floor) * t).toFixed(6)),
+        bid: Number((prev.bid + (next.bid - prev.bid) * t).toFixed(6)),
+      };
+    };
+
+    const rawPoints: Omit<ChartDataPoint, 'vwap' | 'movingAverage' | 'ema' | 'upperBand' | 'lowerBand'>[] = [];
+    let prevClose = interpolateAt(startTime).price;
 
     for (let i = 0; i < stepCount; i++) {
       const pointTime = startTime + i * stepMs;
+      const bucketHalf = stepMs * 0.52;
       const isLatest = i === stepCount - 1;
 
       const d = new Date(pointTime);
       let timeLabel = '';
-      if (timeframe === '1H' || timeframe === '4H') {
-        timeLabel = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      if (timeframe === '1H' || timeframe === '4H' || timeframe === '6H' || timeframe === '12H') {
+        timeLabel = isLatest ? 'Now' : d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
       } else if (timeframe === '1D') {
         timeLabel = isLatest ? 'Now' : d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      } else if (timeframe === '3D') {
+        timeLabel = isLatest ? 'Now' : `${d.getMonth() + 1}/${d.getDate()} ${d.getHours()}h`;
       } else {
-        timeLabel = `${d.getMonth() + 1}/${d.getDate()}`;
+        timeLabel = isLatest ? 'Today' : `${d.getMonth() + 1}/${d.getDate()}`;
       }
 
-      const fullDateLabel = `${d.toLocaleDateString()} ${d.toLocaleTimeString()}`;
+      const fullDateLabel = `${d.toLocaleDateString()} ${d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
 
-      // Gather all completed sales falling inside this time bucket
       const bucketSales = chronSales.filter(
-        (s: any) => Math.abs((s.fulfilledAt || 0) - pointTime) <= stepMs * 0.55
+        (s: any) => s.ts >= pointTime - bucketHalf && s.ts <= pointTime + bucketHalf
       );
-      const nearbySale = bucketSales[bucketSales.length - 1] || chronSales.find(
-        (s: any) => Math.abs((s.fulfilledAt || 0) - pointTime) < stepMs * 0.75
+      const bucketSnaps = parsedSnapshots.filter(
+        s => s.ts >= pointTime - bucketHalf && s.ts <= pointTime + bucketHalf
       );
+      const dateKey = d.toISOString().split('T')[0];
+      const dayHist = (timeframe === '3D' || timeframe === '7D' || timeframe === '1M') ? dailyHistory?.[dateKey] : null;
 
-      let saleP = baseSale;
+      let openP = prevClose;
+      let highP = prevClose;
+      let lowP = prevClose;
+      let closeP = prevClose;
       let floorP = baseFloor;
       let bidP = baseBid;
       let isReal = false;
+      let source = 'Historical Baseline';
 
-      if (isLatest) {
-        saleP = lastSaleUnitFlower;
-        floorP = floorUnitFlower;
-        bidP = bestOfferUnitFlower;
-      } else if (nearbySale) {
-        saleP = Number((nearbySale.sfl / (nearbySale.quantity || 1)).toFixed(6));
-        floorP = saleP * 1.01;
-        bidP = saleP * 0.985;
-        isReal = true;
-      } else {
-        const progress = i / (stepCount - 1);
-        const dayTrend = Math.sin(progress * Math.PI * 1.5) * 0.035;
-        saleP = Number((baseSale * (1 - 0.035 + dayTrend)).toFixed(6));
-        floorP = Number((saleP * 1.012).toFixed(6));
-        bidP = Number((saleP * 0.982).toFixed(6));
-      }
-
-      // Compute bucket FLOWER volume & buyer vs seller taker split
       let bucketVol = 0;
       let buyVol = 0;
       let sellVol = 0;
       let tradeCount = bucketSales.length;
 
-      if (bucketSales.length > 0) {
+      if (isLatest && bucketSales.length === 0) {
+        openP = prevClose;
+        closeP = baseSale;
+        highP = Math.max(openP, closeP, baseFloor);
+        lowP = Math.min(openP, closeP, baseBid > 0 ? baseBid : closeP);
+        floorP = baseFloor;
+        bidP = baseBid;
+        isReal = true;
+        source = 'Live Order Book Tick';
+      } else if (bucketSales.length > 0) {
+        const pricesInBucket = bucketSales.map((s: any) => s.unitPrice);
+        openP = prevClose || pricesInBucket[0];
+        closeP = pricesInBucket[pricesInBucket.length - 1];
+        highP = Math.max(openP, ...pricesInBucket);
+        lowP = Math.min(openP, ...pricesInBucket);
+        floorP = Number((closeP * Math.sqrt(defaultSpreadRatio)).toFixed(6));
+        bidP = Number((closeP / Math.sqrt(defaultSpreadRatio)).toFixed(6));
+        isReal = true;
+        source = `${bucketSales.length} Verified Trade${bucketSales.length > 1 ? 's' : ''}`;
+
         bucketSales.forEach((s: any) => {
           const sfl = Number(s.sfl) || 0;
-          const unitP = sfl / (Number(s.quantity) || 1);
           bucketVol += sfl;
-          const distAsk = Math.abs(unitP - floorP);
-          const distBid = Math.abs(unitP - bidP);
+          const distAsk = Math.abs(s.unitPrice - floorP);
+          const distBid = Math.abs(s.unitPrice - bidP);
           if (distAsk <= distBid) buyVol += sfl;
           else sellVol += sfl;
         });
-      } else if (timeframe === '7D' || timeframe === '1M') {
-        const dateKey = d.toISOString().split('T')[0];
-        const dayHist = dailyHistory?.[dateKey];
-        if (dayHist && Number(dayHist.volume) > 0) {
-          bucketVol = Number(dayHist.volume);
-          tradeCount = Number(dayHist.sales) || 1;
-          const dayMid = ((Number(dayHist.high) || saleP) + (Number(dayHist.low) || saleP)) / 2;
-          const bullBias = saleP >= dayMid ? 0.62 : 0.38;
-          buyVol = bucketVol * bullBias;
-          sellVol = bucketVol * (1 - bullBias);
+
+        if (isLatest) {
+          floorP = baseFloor;
+          bidP = baseBid;
         }
+      } else if (bucketSnaps.length > 0) {
+        const snapPrices = bucketSnaps.map(s => s.sale || s.floor);
+        const lastSnap = bucketSnaps[bucketSnaps.length - 1];
+        openP = prevClose || snapPrices[0];
+        closeP = lastSnap.sale || lastSnap.floor;
+        highP = Math.max(openP, ...snapPrices, lastSnap.floor);
+        lowP = Math.min(openP, ...snapPrices, lastSnap.bid || closeP);
+        floorP = lastSnap.floor || closeP * 1.01;
+        bidP = lastSnap.bid || closeP * 0.985;
+        isReal = true;
+        source = 'Verified Time-Series Snapshot';
+        if (lastSnap.vol > 0) {
+          bucketVol = Number((lastSnap.vol / Math.max(1, stepCount / 2)).toFixed(4));
+          buyVol = bucketVol * (closeP >= openP ? 0.58 : 0.42);
+          sellVol = bucketVol - buyVol;
+        }
+      } else if (dayHist && (Number(dayHist.low) > 0 || Number(dayHist.high) > 0)) {
+        const dLow = Number(dayHist.low) || baseSale;
+        const dHigh = Number(dayHist.high) || dLow;
+        const dMid = (dLow + dHigh) / 2;
+        openP = prevClose || dMid;
+        closeP = Number(dMid.toFixed(6));
+        highP = Math.max(openP, dHigh);
+        lowP = Math.min(openP, dLow);
+        floorP = Number(dHigh.toFixed(6));
+        bidP = Number((dLow * 0.988).toFixed(6));
+        isReal = true;
+        source = `Daily OHLC (${dateKey})`;
+        if (Number(dayHist.volume) > 0) {
+          const sameDaySlots = Math.max(1, Math.round(stepCount / (timeframe === '3D' ? 3 : timeframe === '7D' ? 7 : 30)));
+          bucketVol = Number((Number(dayHist.volume) / sameDaySlots).toFixed(4));
+          tradeCount = Math.max(1, Math.round((Number(dayHist.sales) || 1) / sameDaySlots));
+          const bullBias = closeP >= openP ? 0.6 : 0.4;
+          buyVol = bucketVol * bullBias;
+          sellVol = bucketVol - buyVol;
+        }
+      } else {
+        const interp = interpolateAt(pointTime);
+        openP = prevClose;
+        closeP = interp.price;
+        highP = Math.max(openP, closeP);
+        lowP = Math.min(openP, closeP);
+        floorP = interp.floor;
+        bidP = interp.bid;
+        isReal = false;
+        source = 'Interpolated Between Verified Anchors';
       }
+
+      prevClose = closeP;
 
       rawPoints.push({
         timestamp: pointTime,
         timeLabel,
         fullDateLabel,
-        salePrice: Math.max(0.000001, saleP),
+        open: Math.max(0.000001, openP),
+        high: Math.max(0.000001, highP),
+        low: Math.max(0.000001, lowP),
+        close: Math.max(0.000001, closeP),
+        salePrice: Math.max(0.000001, closeP),
         floorAsk: Math.max(0.000001, floorP),
         bestBid: Math.max(0.000001, bidP),
-        source: isReal ? 'Verified FLOWER Settlement' : 'Market Order Book Depth',
+        source,
         isRealSale: isReal,
         volume: Number(bucketVol.toFixed(4)),
         buyVolume: Number(buyVol.toFixed(4)),
@@ -586,34 +771,127 @@ export default function TradeableOrderBookModal({
       });
     }
 
-    // Calculate cumulative VWAP and 5-period Moving Average across the series
+    // Calculate cumulative VWAP, 5-period SMA, 7-period EMA, and ±1.5σ Volatility Channel
     let cumWeightedPrice = 0;
     let cumWeight = 0;
+    const emaK = 2 / (7 + 1);
+    let runningEma = rawPoints[0]?.close || baseSale;
 
     for (let i = 0; i < rawPoints.length; i++) {
       const p = rawPoints[i];
-      // Use real bucket volume if present, otherwise small baseline weight so VWAP tracks smoothly
-      const w = p.volume > 0 ? p.volume : Math.max(0.5, (baseSale || 0.01) * 50);
-      cumWeightedPrice += p.salePrice * w;
+      const w = p.volume > 0 ? p.volume : Math.max(0.25, (baseSale || 0.01) * 25);
+      cumWeightedPrice += p.close * w;
       cumWeight += w;
-      const vwap = cumWeight > 0 ? Number((cumWeightedPrice / cumWeight).toFixed(6)) : p.salePrice;
+      const vwap = cumWeight > 0 ? Number((cumWeightedPrice / cumWeight).toFixed(6)) : p.close;
 
-      // 5-period Moving Average
       const maStart = Math.max(0, i - 4);
       const maSlice = rawPoints.slice(maStart, i + 1);
       const movingAverage = Number(
-        (maSlice.reduce((sum, pt) => sum + pt.salePrice, 0) / maSlice.length).toFixed(6)
+        (maSlice.reduce((sum, pt) => sum + pt.close, 0) / maSlice.length).toFixed(6)
       );
+
+      runningEma = i === 0 ? p.close : p.close * emaK + runningEma * (1 - emaK);
+      const ema = Number(runningEma.toFixed(6));
+
+      const variance =
+        maSlice.reduce((acc, pt) => acc + Math.pow(pt.close - movingAverage, 2), 0) / maSlice.length;
+      const stdDev = Math.sqrt(variance);
+      const upperBand = Number((movingAverage + stdDev * 1.5).toFixed(6));
+      const lowerBand = Number(Math.max(0.000001, movingAverage - stdDev * 1.5).toFixed(6));
 
       points.push({
         ...p,
         vwap,
         movingAverage,
+        ema,
+        upperBand,
+        lowerBand,
       });
     }
 
     return points;
-  }, [sales, dailyHistory, lastSaleUnitFlower, floorUnitFlower, bestOfferUnitFlower, timeframe]);
+  }, [sales, storedSnapshots, dailyHistory, lastSaleUnitFlower, floorUnitFlower, bestOfferUnitFlower, timeframe]);
+
+  // 6a-2. Window Performance & Buy vs Hold Decision Analytics (computed directly from active window)
+  const windowAnalytics = useMemo(() => {
+    if (chartPoints.length === 0) return null;
+    const first = chartPoints[0];
+    const last = chartPoints[chartPoints.length - 1];
+    const periodOpen = first.open;
+    const periodClose = floorUnitFlower || last.close;
+    const periodHigh = Math.max(...chartPoints.map(p => p.high), periodClose);
+    const periodLow = Math.min(...chartPoints.map(p => p.low), periodClose);
+    const changeFlower = Number((periodClose - periodOpen).toFixed(6));
+    const changePct = periodOpen > 0 ? Number((((periodClose - periodOpen) / periodOpen) * 100).toFixed(2)) : 0;
+    const windowVwap = last.vwap || periodClose;
+    const vsVwapPct = windowVwap > 0 ? Number((((periodClose - windowVwap) / windowVwap) * 100).toFixed(2)) : 0;
+    const rangeSpan = periodHigh - periodLow;
+    const rangePositionPct = rangeSpan > 0 ? Math.max(0, Math.min(100, Math.round(((periodClose - periodLow) / rangeSpan) * 100))) : 50;
+
+    const totalWindowVolume = Number(chartPoints.reduce((s, p) => s + p.volume, 0).toFixed(2));
+    const totalBuyVol = chartPoints.reduce((s, p) => s + p.buyVolume, 0);
+    const totalSellVol = chartPoints.reduce((s, p) => s + p.sellVolume, 0);
+    const totalFlow = totalBuyVol + totalSellVol;
+    const buyDominancePct = totalFlow > 0 ? Math.round((totalBuyVol / totalFlow) * 100) : smartSignals.signalIndicator.buyPressurePercent;
+    const verifiedSamplesCount = chartPoints.filter(p => p.isRealSale).length;
+    const totalWindowTrades = chartPoints.reduce((s, p) => s + p.tradeCount, 0);
+
+    let decision: 'BUY / ACCUMULATE' | 'HOLD / MONITOR' | 'SELL / TRIM SURPLUS' = 'HOLD / MONITOR';
+    let decisionColor = 'bg-amber-950/70 text-amber-300 border-amber-500/40';
+    let decisionBullets: string[] = [];
+
+    const isDiscountZone = vsVwapPct <= -0.5 || rangePositionPct <= 35;
+    const isExtendedZone = vsVwapPct >= 1.5 && rangePositionPct >= 75;
+
+    if (isDiscountZone && buyDominancePct >= 50) {
+      decision = 'BUY / ACCUMULATE';
+      decisionColor = 'bg-emerald-950/80 text-emerald-300 border-emerald-500/50';
+      decisionBullets = [
+        `Spot (${periodClose.toFixed(4)} F) trades in the lower ${rangePositionPct}% of the ${timeframe} range (${periodLow.toFixed(4)}–${periodHigh.toFixed(4)} F).`,
+        `Trading ${Math.abs(vsVwapPct)}% ${vsVwapPct <= 0 ? 'below' : 'near'} ${timeframe} VWAP (${windowVwap.toFixed(4)} F) with ${buyDominancePct}% buyer absorption.`,
+        marketAdvantage.surplus > 0
+          ? `Avoid dumping your ${marketAdvantage.surplus.toLocaleString()} surplus into low territory; scale limit buys near ${periodLow.toFixed(4)} F.`
+          : `Favorable limit-buy entry zone if stocking inputs for upgrades or short-term rebound.`,
+      ];
+    } else if (isExtendedZone || (changePct >= 3.5 && marketAdvantage.surplus > 0)) {
+      decision = 'SELL / TRIM SURPLUS';
+      decisionColor = 'bg-cyan-950/80 text-cyan-300 border-cyan-500/50';
+      decisionBullets = [
+        `Spot sits near top ${rangePositionPct}% of ${timeframe} range (+${changePct}% window change, +${vsVwapPct}% above ${timeframe} VWAP).`,
+        `Order-book sell strength captures elevated buyer liquidity without cutting into your ${marketAdvantage.reserved.toLocaleString()} upgrade reserve.`,
+        marketAdvantage.surplus > 0
+          ? `Your ${marketAdvantage.surplus.toLocaleString()} surplus yields ~${marketAdvantage.netFlower} F net after 10% P2P tax.`
+          : `If looking to buy, wait for a pullback closer to ${timeframe} VWAP (${windowVwap.toFixed(4)} F) instead of chasing highs.`,
+      ];
+    } else {
+      decision = 'HOLD / MONITOR';
+      decisionColor = 'bg-amber-950/70 text-amber-300 border-amber-500/40';
+      decisionBullets = [
+        `Price sits at ${rangePositionPct}% of ${timeframe} range (${changePct >= 0 ? `+${changePct}%` : `${changePct}%`}) vs VWAP ${windowVwap.toFixed(4)} F.`,
+        `Buyer vs Seller taker split stands at ${buyDominancePct}% / ${100 - buyDominancePct}% across ${verifiedSamplesCount} verified checkpoints.`,
+        `Hold existing barn inventory unless spot breaks above ${periodHigh.toFixed(4)} F (take profit) or dips below ${windowVwap.toFixed(4)} F (accumulate).`,
+      ];
+    }
+
+    return {
+      periodOpen,
+      periodClose,
+      periodHigh,
+      periodLow,
+      changeFlower,
+      changePct,
+      windowVwap,
+      vsVwapPct,
+      rangePositionPct,
+      totalWindowVolume,
+      buyDominancePct,
+      verifiedSamplesCount,
+      totalWindowTrades,
+      decision,
+      decisionColor,
+      decisionBullets,
+    };
+  }, [chartPoints, floorUnitFlower, timeframe, smartSignals, marketAdvantage]);
 
   // =========================================================================
   // 6b. MARKET PRESSURE INDEX (MPI) SERIES (FEATURE 6)
@@ -629,7 +907,7 @@ export default function TradeableOrderBookModal({
   }, [chartPoints, listings, offers, sales, timeframe]);
 
   // =========================================================================
-  // 6c. SVG GEOMETRY FOR MULTI-INDICATOR PRICE INTELLIGENCE CHART (FEATURE 8)
+  // 6c. SVG GEOMETRY FOR PRO CANDLESTICK & MULTI-INDICATOR CHART
   // =========================================================================
   const supportLevelFlower =
     smartSignals.twoSidedDepth.strongBuyWalls[0]?.price ||
@@ -643,23 +921,25 @@ export default function TradeableOrderBookModal({
 
     const activeValues: number[] = [];
     chartPoints.forEach(p => {
-      if (showSales) activeValues.push(p.salePrice);
+      if (showSales) {
+        activeValues.push(p.high, p.low, p.salePrice);
+      }
       if (showAsks) activeValues.push(p.floorAsk);
       if (showBids) activeValues.push(p.bestBid);
       if (showVwap) activeValues.push(p.vwap);
       if (showMovingAverage) activeValues.push(p.movingAverage);
+      if (showEma) activeValues.push(p.ema);
+      if (showBands) activeValues.push(p.upperBand, p.lowerBand);
     });
 
     if (activeValues.length === 0) {
-      // Keep baseline scale even if user toggles off price lines to inspect Pressure/Volume
-      chartPoints.forEach(p => activeValues.push(p.salePrice));
+      chartPoints.forEach(p => activeValues.push(p.high, p.low));
     }
 
     let rawMin = Math.min(...activeValues);
     let rawMax = Math.max(...activeValues);
 
     if (showSupportResistance) {
-      // Gently expand bounds if support/resistance walls are nearby (within 25%)
       if (supportLevelFlower > 0 && supportLevelFlower >= rawMin * 0.75) {
         rawMin = Math.min(rawMin, supportLevelFlower);
       }
@@ -668,23 +948,26 @@ export default function TradeableOrderBookModal({
       }
     }
 
-    const padding = (rawMax - rawMin) * 0.16 || rawMin * 0.05 || 0.0001;
+    const padding = (rawMax - rawMin) * 0.18 || rawMin * 0.05 || 0.0001;
     const minY = Math.max(0, rawMin - padding);
     const maxY = rawMax + padding;
     const rangeY = maxY - minY || 1;
 
-    const width = 680;
-    const height = 225;
-    const padTop = 15;
-    const padBottom = 25;
-    const padLeft = 10;
-    const padRight = 58;
+    const width = 720;
+    const height = 275;
+    const padTop = 18;
+    const padBottom = 26;
+    const padLeft = 14;
+    const padRight = 68;
 
     const plotW = width - padLeft - padRight;
     const plotH = height - padTop - padBottom;
 
-    const getX = (idx: number) => padLeft + (idx / (chartPoints.length - 1)) * plotW;
-    const getY = (val: number) => padTop + plotH - ((val - minY) / rangeY) * plotH;
+    // Reserve lower 18% of plot subtly when Volume histogram is active
+    const pricePlotH = showVolumeOverlay ? plotH * 0.84 : plotH;
+    const getX = (idx: number) => padLeft + ((idx + 0.5) / chartPoints.length) * plotW;
+    const getY = (val: number) => padTop + pricePlotH - ((val - minY) / rangeY) * pricePlotH;
+    const candleWidth = Math.max(4, Math.min(16, (plotW / chartPoints.length) * 0.58));
 
     const buildPath = (extractor: (p: ChartDataPoint) => number) =>
       chartPoints.map((p, i) => `${i === 0 ? 'M' : 'L'} ${getX(i).toFixed(1)} ${getY(extractor(p)).toFixed(1)}`).join(' ');
@@ -694,17 +977,23 @@ export default function TradeableOrderBookModal({
     const bidsPath = buildPath(p => p.bestBid);
     const vwapPath = buildPath(p => p.vwap);
     const maPath = buildPath(p => p.movingAverage);
-    const areaPath = `${salesPath} L ${getX(chartPoints.length - 1)} ${padTop + plotH} L ${getX(0)} ${padTop + plotH} Z`;
+    const emaPath = buildPath(p => p.ema);
+    const upperBandPath = buildPath(p => p.upperBand);
+    const lowerBandPath = buildPath(p => p.lowerBand);
+    const bandAreaPath = `${upperBandPath} ${[...chartPoints].reverse().map((p, ri) => {
+      const idx = chartPoints.length - 1 - ri;
+      return `L ${getX(idx).toFixed(1)} ${getY(p.lowerBand).toFixed(1)}`;
+    }).join(' ')} Z`;
+    const areaPath = `${salesPath} L ${getX(chartPoints.length - 1).toFixed(1)} ${padTop + pricePlotH} L ${getX(0).toFixed(1)} ${padTop + pricePlotH} Z`;
 
-    // Support & Resistance Y coords (clamped cleanly inside plot window)
-    const supportY = Math.max(padTop, Math.min(padTop + plotH, getY(supportLevelFlower)));
-    const resistanceY = Math.max(padTop, Math.min(padTop + plotH, getY(resistanceLevelFlower)));
+    const supportY = Math.max(padTop, Math.min(padTop + pricePlotH, getY(supportLevelFlower)));
+    const resistanceY = Math.max(padTop, Math.min(padTop + pricePlotH, getY(resistanceLevelFlower)));
+    const spotPrice = floorUnitFlower || chartPoints[chartPoints.length - 1].salePrice;
+    const spotLineY = Math.max(padTop, Math.min(padTop + pricePlotH, getY(spotPrice)));
 
-    // Volume overlay bar geometry (lower 24% strip)
     const maxBucketVol = Math.max(...chartPoints.map(p => p.volume), 0.0001);
-    const volStripHeight = plotH * 0.24;
+    const volStripHeight = plotH * 0.22;
 
-    // Pressure overlay curve geometry (lower 22% strip centered at bottom)
     const pressureTop = padTop + plotH * 0.72;
     const pressureHeight = plotH * 0.24;
     const pressureZeroY = pressureTop + pressureHeight / 2;
@@ -715,14 +1004,26 @@ export default function TradeableOrderBookModal({
       })
       .join(' ');
 
-    const yTicks = [
-      { val: maxY, y: padTop, label: maxY < 0.01 ? maxY.toFixed(5) : maxY.toFixed(4) },
-      { val: minY + rangeY * 0.5, y: padTop + plotH * 0.5, label: (minY + rangeY * 0.5) < 0.01 ? (minY + rangeY * 0.5).toFixed(5) : (minY + rangeY * 0.5).toFixed(4) },
-      { val: minY, y: padTop + plotH, label: minY < 0.01 ? minY.toFixed(5) : minY.toFixed(4) },
-    ];
+    const fmtTick = (val: number) => (val < 0.01 ? val.toFixed(5) : val.toFixed(4));
+    const yTicks = [0, 0.25, 0.5, 0.75, 1].map(frac => {
+      const val = maxY - frac * rangeY;
+      return {
+        val,
+        y: padTop + frac * pricePlotH,
+        label: fmtTick(val),
+      };
+    });
 
-    const xStep = Math.floor((chartPoints.length - 1) / 3);
-    const xTicks = [0, xStep, xStep * 2, chartPoints.length - 1].map(idx => ({
+    const tickIndices = Array.from(
+      new Set([
+        0,
+        Math.floor((chartPoints.length - 1) * 0.25),
+        Math.floor((chartPoints.length - 1) * 0.5),
+        Math.floor((chartPoints.length - 1) * 0.75),
+        chartPoints.length - 1,
+      ])
+    );
+    const xTicks = tickIndices.map(idx => ({
       idx,
       x: getX(idx),
       label: chartPoints[idx]?.timeLabel || '',
@@ -733,10 +1034,12 @@ export default function TradeableOrderBookModal({
       height,
       plotW,
       plotH,
+      pricePlotH,
       padTop,
       padBottom,
       padLeft,
       padRight,
+      candleWidth,
       getX,
       getY,
       salesPath,
@@ -744,9 +1047,15 @@ export default function TradeableOrderBookModal({
       bidsPath,
       vwapPath,
       maPath,
+      emaPath,
+      upperBandPath,
+      lowerBandPath,
+      bandAreaPath,
       areaPath,
       supportY,
       resistanceY,
+      spotPrice,
+      spotLineY,
       maxBucketVol,
       volStripHeight,
       pressureZeroY,
@@ -755,6 +1064,7 @@ export default function TradeableOrderBookModal({
       xTicks,
       minY,
       maxY,
+      fmtTick,
     };
   }, [
     chartPoints,
@@ -764,9 +1074,13 @@ export default function TradeableOrderBookModal({
     showBids,
     showVwap,
     showMovingAverage,
+    showEma,
+    showBands,
+    showVolumeOverlay,
     showSupportResistance,
     supportLevelFlower,
     resistanceLevelFlower,
+    floorUnitFlower,
   ]);
 
   const handleChartMouseMove = (e: React.MouseEvent<SVGSVGElement>) => {
@@ -3650,13 +3964,13 @@ export default function TradeableOrderBookModal({
                       </div>
                     </div>
 
-                    {/* Time Period Selector (Preserved 1H, 4H, 1D, 7D, 1M) */}
+                    {/* Time Period Selector (1H, 4H, 6H, 12H, 1D, 3D, 7D, 1M) */}
                     <div className="flex flex-col gap-1">
                       <span className="text-[9px] font-bold uppercase tracking-wider text-amber-200/50 px-1">
-                        Time period
+                        Past Trade Window
                       </span>
-                      <div className="flex items-center gap-1 bg-[#120d07] p-1 rounded-2xl border border-amber-500/20">
-                        {(['1H', '4H', '1D', '7D', '1M'] as ChartTimeframe[]).map(tf => (
+                      <div className="flex items-center flex-wrap gap-1 bg-[#120d07] p-1 rounded-2xl border border-amber-500/20">
+                        {(['1H', '4H', '6H', '12H', '1D', '3D', '7D', '1M'] as ChartTimeframe[]).map(tf => (
                           <button
                             key={tf}
                             onClick={() => setTimeframe(tf)}
@@ -3677,12 +3991,88 @@ export default function TradeableOrderBookModal({
                 {/* MODE BODY SWITCH */}
                 {chartMode === 'price' ? (
                   <div className="space-y-4">
-                    {/* 8 Multi-Indicator Overlay Toggles Bar */}
-                    <div className="flex flex-col gap-2 pt-2 border-t border-amber-900/20 text-xs">
+                    {/* Pro Trading Ticker HUD Bar (OHLC + Range + VWAP + Window Return) */}
+                    {windowAnalytics && (
+                      <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-6 gap-2.5 p-3 rounded-2xl bg-[#110c07] border border-amber-500/20 text-xs">
+                        <div>
+                          <span className="text-[9px] uppercase font-bold text-amber-200/50 block">
+                            {timeframe} Change
+                          </span>
+                          <span
+                            className={`text-sm font-black font-mono ${
+                              windowAnalytics.changePct >= 0 ? 'text-emerald-400' : 'text-rose-400'
+                            }`}
+                          >
+                            {windowAnalytics.changePct >= 0
+                              ? `+${windowAnalytics.changePct}%`
+                              : `${windowAnalytics.changePct}%`}
+                          </span>
+                        </div>
+                        <div>
+                          <span className="text-[9px] uppercase font-bold text-amber-200/50 block">
+                            {timeframe} High / Low
+                          </span>
+                          <span className="text-[11px] font-bold font-mono text-amber-100">
+                            {windowAnalytics.periodHigh.toFixed(4)} / {windowAnalytics.periodLow.toFixed(4)}
+                          </span>
+                        </div>
+                        <div>
+                          <span className="text-[9px] uppercase font-bold text-amber-200/50 block">
+                            {timeframe} VWAP
+                          </span>
+                          <span className="text-[11px] font-bold font-mono text-fuchsia-300">
+                            {windowAnalytics.windowVwap.toFixed(4)} F{' '}
+                            <span className={windowAnalytics.vsVwapPct <= 0 ? 'text-emerald-400' : 'text-amber-300'}>
+                              ({windowAnalytics.vsVwapPct >= 0 ? `+${windowAnalytics.vsVwapPct}%` : `${windowAnalytics.vsVwapPct}%`})
+                            </span>
+                          </span>
+                        </div>
+                        <div>
+                          <span className="text-[9px] uppercase font-bold text-amber-200/50 block">
+                            Range Position
+                          </span>
+                          <span className="text-[11px] font-bold font-mono text-cyan-300">
+                            {windowAnalytics.rangePositionPct}% of range
+                          </span>
+                        </div>
+                        <div>
+                          <span className="text-[9px] uppercase font-bold text-amber-200/50 block">
+                            Buyer Flow ({timeframe})
+                          </span>
+                          <span className="text-[11px] font-bold font-mono text-emerald-300">
+                            {windowAnalytics.buyDominancePct}% Buyers ({windowAnalytics.verifiedSamplesCount} pts)
+                          </span>
+                        </div>
+                        <div>
+                          <span className="text-[9px] uppercase font-bold text-amber-200/50 block">
+                            Chart Style
+                          </span>
+                          <div className="inline-flex items-center gap-1 mt-0.5 bg-[#1b140c] p-0.5 rounded-lg border border-amber-500/20">
+                            {(['candles', 'area'] as ChartStyleMode[]).map(st => (
+                              <button
+                                key={st}
+                                type="button"
+                                onClick={() => setChartStyle(st)}
+                                className={`px-2 py-0.5 rounded text-[10px] font-bold transition-all ${
+                                  chartStyle === st
+                                    ? 'bg-amber-500 text-stone-950 font-black'
+                                    : 'text-amber-200/60 hover:text-amber-100'
+                                }`}
+                              >
+                                {st === 'candles' ? 'Candles' : 'Line'}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Multi-Indicator Overlay Toggles Bar */}
+                    <div className="flex flex-col gap-2 pt-1 text-xs">
                       <div className="flex items-center justify-between gap-2 flex-wrap">
                         <div className="flex items-center gap-2">
                           <span className="text-[10px] font-bold uppercase tracking-wider text-amber-300/80">
-                            Indicator Overlays
+                            Technical Overlays
                           </span>
                           <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-amber-950/70 text-amber-300 border border-amber-500/30">
                             {[
@@ -3690,32 +4080,39 @@ export default function TradeableOrderBookModal({
                               showAsks,
                               showBids,
                               showVwap,
+                              showEma,
                               showMovingAverage,
+                              showBands,
                               showSupportResistance,
                               showPressureOverlay,
                               showVolumeOverlay,
-                            ].filter(Boolean).length}/8 Active
+                            ].filter(Boolean).length}/10 Active
                           </span>
                         </div>
 
                         <div className="flex items-center gap-3">
                           <span className="text-[11px] text-amber-200/50 hidden sm:inline">
-                            {timeframe === '1H' && '1–5 min resolution • Short-term tension'}
-                            {timeframe === '4H' && '5–15 min resolution • Intraday direction'}
-                            {timeframe === '1D' && '15–60 min resolution • Daily market trend'}
-                            {timeframe === '7D' && '1–4 hour resolution • Weekly momentum'}
-                            {timeframe === '1M' && '6–24 hour resolution • Longer-term direction'}
+                            {timeframe === '1H' && '~4 min candles • Micro scalp & spread'}
+                            {timeframe === '4H' && '10 min candles • Short-term intraday swing'}
+                            {timeframe === '6H' && '15 min candles • Quarter-day trend'}
+                            {timeframe === '12H' && '30 min candles • Half-day direction'}
+                            {timeframe === '1D' && '1 hour candles • Daily session trend'}
+                            {timeframe === '3D' && '3 hour candles • 3-day accumulation/dump'}
+                            {timeframe === '7D' && '6 hour candles • Weekly trend & OHLC'}
+                            {timeframe === '1M' && '24 hour candles • Monthly macro structure'}
                           </span>
                           <button
                             onClick={() => {
                               setShowSales(true);
                               setShowAsks(true);
                               setShowBids(true);
-                              setShowVwap(false);
+                              setShowVwap(true);
+                              setShowEma(true);
                               setShowMovingAverage(false);
+                              setShowBands(false);
                               setShowSupportResistance(false);
                               setShowPressureOverlay(false);
-                              setShowVolumeOverlay(false);
+                              setShowVolumeOverlay(true);
                             }}
                             className="text-[10px] font-bold px-2.5 py-1 rounded-lg bg-[#1c140c] border border-amber-500/25 text-amber-300/80 hover:text-amber-100 hover:border-amber-400/50 transition-all"
                           >
@@ -3734,7 +4131,7 @@ export default function TradeableOrderBookModal({
                           }`}
                         >
                           <span className="w-2.5 h-2.5 rounded-full bg-amber-400" />
-                          <span>Completed Sales</span>
+                          <span>{chartStyle === 'candles' ? 'OHLC Candles' : 'Completed Sales'}</span>
                         </button>
 
                         <button
@@ -3774,6 +4171,18 @@ export default function TradeableOrderBookModal({
                         </button>
 
                         <button
+                          onClick={() => setShowEma(!showEma)}
+                          className={`flex items-center gap-1.5 px-2.5 py-1 rounded-xl border transition-all ${
+                            showEma
+                              ? 'bg-lime-500/20 border-lime-500/60 text-lime-300 font-bold'
+                              : 'bg-stone-900/60 border-stone-800 text-stone-500 hover:text-stone-300'
+                          }`}
+                        >
+                          <span className="w-2.5 h-1 rounded-full bg-lime-400" />
+                          <span>EMA-7</span>
+                        </button>
+
+                        <button
                           onClick={() => setShowMovingAverage(!showMovingAverage)}
                           className={`flex items-center gap-1.5 px-2.5 py-1 rounded-xl border transition-all ${
                             showMovingAverage
@@ -3782,7 +4191,19 @@ export default function TradeableOrderBookModal({
                           }`}
                         >
                           <span className="w-2.5 h-1 rounded-full bg-emerald-400" />
-                          <span>Moving Average</span>
+                          <span>SMA-5</span>
+                        </button>
+
+                        <button
+                          onClick={() => setShowBands(!showBands)}
+                          className={`flex items-center gap-1.5 px-2.5 py-1 rounded-xl border transition-all ${
+                            showBands
+                              ? 'bg-indigo-500/20 border-indigo-500/60 text-indigo-300 font-bold'
+                              : 'bg-stone-900/60 border-stone-800 text-stone-500 hover:text-stone-300'
+                          }`}
+                        >
+                          <span className="w-2.5 h-2 rounded-sm bg-indigo-400/50 border border-indigo-400" />
+                          <span>Volatility Band</span>
                         </button>
 
                         <button
@@ -3794,7 +4215,7 @@ export default function TradeableOrderBookModal({
                           }`}
                         >
                           <span className="w-2.5 h-1 rounded-full bg-orange-400" />
-                          <span>Support & Resistance</span>
+                          <span>Support &amp; Resistance</span>
                         </button>
 
                         <button
@@ -3994,8 +4415,17 @@ export default function TradeableOrderBookModal({
                             </g>
                           )}
 
-                          {/* Layer 4: Core Area + Ask + Bid Lines */}
-                          {showSales && (
+                          {/* Layer 3.5: Volatility Channel Envelope */}
+                          {showBands && (
+                            <g>
+                              <path d={chartGeometry.bandAreaPath} fill="#6366f1" fillOpacity="0.1" />
+                              <path d={chartGeometry.upperBandPath} fill="none" stroke="#818cf8" strokeWidth="1" strokeDasharray="3 3" strokeOpacity="0.7" />
+                              <path d={chartGeometry.lowerBandPath} fill="none" stroke="#818cf8" strokeWidth="1" strokeDasharray="3 3" strokeOpacity="0.7" />
+                            </g>
+                          )}
+
+                          {/* Layer 4: Core Area / Candles + Ask + Bid Lines */}
+                          {showSales && chartStyle === 'area' && (
                             <path d={chartGeometry.areaPath} fill="url(#primaryAreaGrad)" />
                           )}
 
@@ -4004,8 +4434,9 @@ export default function TradeableOrderBookModal({
                               d={chartGeometry.asksPath}
                               fill="none"
                               stroke="#fb7185"
-                              strokeWidth="1.8"
+                              strokeWidth="1.5"
                               strokeDasharray="4 4"
+                              strokeOpacity="0.85"
                             />
                           )}
 
@@ -4014,20 +4445,32 @@ export default function TradeableOrderBookModal({
                               d={chartGeometry.bidsPath}
                               fill="none"
                               stroke="#38bdf8"
-                              strokeWidth="1.8"
+                              strokeWidth="1.5"
                               strokeDasharray="2 3"
+                              strokeOpacity="0.85"
                             />
                           )}
 
-                          {/* Layer 5: 5-Period Moving Average & Cumulative VWAP */}
+                          {/* Layer 5: Moving Averages & Cumulative VWAP */}
                           {showMovingAverage && (
                             <path
                               d={chartGeometry.maPath}
                               fill="none"
                               stroke="#34d399"
-                              strokeWidth="1.8"
+                              strokeWidth="1.6"
                               strokeDasharray="5 2"
                               strokeLinecap="round"
+                            />
+                          )}
+
+                          {showEma && (
+                            <path
+                              d={chartGeometry.emaPath}
+                              fill="none"
+                              stroke="#a3e635"
+                              strokeWidth="1.6"
+                              strokeLinecap="round"
+                              strokeOpacity="0.9"
                             />
                           )}
 
@@ -4036,39 +4479,115 @@ export default function TradeableOrderBookModal({
                               d={chartGeometry.vwapPath}
                               fill="none"
                               stroke="#e879f9"
-                              strokeWidth="1.9"
+                              strokeWidth="1.8"
                               strokeLinecap="round"
                             />
                           )}
 
-                          {/* Layer 6: Primary Completed Sales Curve */}
-                          {showSales && (
-                            <path
-                              d={chartGeometry.salesPath}
-                              fill="none"
+                          {/* Layer 6: Candlestick OHLC Bars OR Smooth Sales Line */}
+                          {showSales && chartStyle === 'candles' ? (
+                            <g>
+                              {chartPoints.map((p, idx) => {
+                                const x = chartGeometry.getX(idx);
+                                const yHigh = chartGeometry.getY(p.high);
+                                const yLow = chartGeometry.getY(p.low);
+                                const yOpen = chartGeometry.getY(p.open);
+                                const yClose = chartGeometry.getY(p.close);
+                                const isBull = p.close >= p.open;
+                                const candleColor = isBull ? '#10b981' : '#f43f5e';
+                                const bodyTop = Math.min(yOpen, yClose);
+                                const bodyHeight = Math.max(2, Math.abs(yClose - yOpen));
+                                const isHovered = hoveredIndex === idx;
+                                return (
+                                  <g key={`candle-${idx}`} opacity={hoveredIndex !== null && !isHovered ? 0.65 : 1}>
+                                    {/* Upper & Lower Wick */}
+                                    <line
+                                      x1={x}
+                                      y1={yHigh}
+                                      x2={x}
+                                      y2={yLow}
+                                      stroke={candleColor}
+                                      strokeWidth={isHovered ? '2' : '1.4'}
+                                      strokeOpacity={p.isRealSale ? 0.95 : 0.45}
+                                    />
+                                    {/* Candle Body */}
+                                    <rect
+                                      x={x - chartGeometry.candleWidth / 2}
+                                      y={bodyTop}
+                                      width={chartGeometry.candleWidth}
+                                      height={bodyHeight}
+                                      rx="1.5"
+                                      fill={candleColor}
+                                      fillOpacity={p.isRealSale ? 0.9 : 0.32}
+                                      stroke={candleColor}
+                                      strokeWidth={isHovered ? '1.4' : '0.8'}
+                                    />
+                                  </g>
+                                );
+                              })}
+                            </g>
+                          ) : (
+                            showSales && (
+                              <>
+                                <path
+                                  d={chartGeometry.salesPath}
+                                  fill="none"
+                                  stroke="#f59e0b"
+                                  strokeWidth="2.4"
+                                  strokeLinecap="round"
+                                  strokeLinejoin="round"
+                                />
+                                {chartPoints.map((p, idx) => {
+                                  if (!p.isRealSale) return null;
+                                  return (
+                                    <circle
+                                      key={idx}
+                                      cx={chartGeometry.getX(idx)}
+                                      cy={chartGeometry.getY(p.salePrice)}
+                                      r="3.2"
+                                      fill="#10b981"
+                                      stroke="#064e3b"
+                                      strokeWidth="1.4"
+                                    />
+                                  );
+                                })}
+                              </>
+                            )
+                          )}
+
+                          {/* Live Spot Ask Horizontal Line & Right-Axis Price Flag */}
+                          <g>
+                            <line
+                              x1={chartGeometry.padLeft}
+                              y1={chartGeometry.spotLineY}
+                              x2={chartGeometry.width - chartGeometry.padRight}
+                              y2={chartGeometry.spotLineY}
                               stroke="#f59e0b"
-                              strokeWidth="2.5"
-                              strokeLinecap="round"
-                              strokeLinejoin="round"
+                              strokeWidth="1"
+                              strokeDasharray="3 3"
+                              strokeOpacity="0.6"
                             />
-                          )}
+                            <rect
+                              x={chartGeometry.width - chartGeometry.padRight + 2}
+                              y={chartGeometry.spotLineY - 8}
+                              width={chartGeometry.padRight - 5}
+                              height="16"
+                              rx="4"
+                              fill="#f59e0b"
+                            />
+                            <text
+                              x={chartGeometry.width - chartGeometry.padRight + 6}
+                              y={chartGeometry.spotLineY + 3}
+                              fill="#1c1208"
+                              fontSize="8.5"
+                              fontFamily="monospace"
+                              fontWeight="bold"
+                            >
+                              {chartGeometry.fmtTick(chartGeometry.spotPrice)}
+                            </text>
+                          </g>
 
-                          {showSales && chartPoints.map((p, idx) => {
-                            if (!p.isRealSale) return null;
-                            return (
-                              <circle
-                                key={idx}
-                                cx={chartGeometry.getX(idx)}
-                                cy={chartGeometry.getY(p.salePrice)}
-                                r="3.5"
-                                fill="#10b981"
-                                stroke="#064e3b"
-                                strokeWidth="1.5"
-                              />
-                            );
-                          })}
-
-                          {/* Interactive Crosshair */}
+                          {/* Interactive Vertical + Horizontal Crosshair */}
                           {hoveredIndex !== null && (
                             <g>
                               <line
@@ -4078,13 +4597,23 @@ export default function TradeableOrderBookModal({
                                 y2={chartGeometry.height - chartGeometry.padBottom}
                                 stroke="#f59e0b"
                                 strokeWidth="1.2"
-                                strokeDasharray="2 2"
+                                strokeDasharray="3 2"
+                              />
+                              <line
+                                x1={chartGeometry.padLeft}
+                                y1={chartGeometry.getY(chartPoints[hoveredIndex].close)}
+                                x2={chartGeometry.width - chartGeometry.padRight}
+                                y2={chartGeometry.getY(chartPoints[hoveredIndex].close)}
+                                stroke="#fbbf24"
+                                strokeWidth="0.9"
+                                strokeDasharray="3 3"
+                                strokeOpacity="0.65"
                               />
                               {showSales && (
                                 <circle
                                   cx={chartGeometry.getX(hoveredIndex)}
-                                  cy={chartGeometry.getY(chartPoints[hoveredIndex].salePrice)}
-                                  r="5"
+                                  cy={chartGeometry.getY(chartPoints[hoveredIndex].close)}
+                                  r="4.8"
                                   fill="#f59e0b"
                                   stroke="#17120b"
                                   strokeWidth="2"
@@ -4094,18 +4623,18 @@ export default function TradeableOrderBookModal({
                                 <circle
                                   cx={chartGeometry.getX(hoveredIndex)}
                                   cy={chartGeometry.getY(chartPoints[hoveredIndex].vwap)}
-                                  r="3.8"
+                                  r="3.5"
                                   fill="#e879f9"
                                   stroke="#17120b"
                                   strokeWidth="1.5"
                                 />
                               )}
-                              {showMovingAverage && (
+                              {showEma && (
                                 <circle
                                   cx={chartGeometry.getX(hoveredIndex)}
-                                  cy={chartGeometry.getY(chartPoints[hoveredIndex].movingAverage)}
-                                  r="3.8"
-                                  fill="#34d399"
+                                  cy={chartGeometry.getY(chartPoints[hoveredIndex].ema)}
+                                  r="3.5"
+                                  fill="#a3e635"
                                   stroke="#17120b"
                                   strokeWidth="1.5"
                                 />
@@ -4125,77 +4654,82 @@ export default function TradeableOrderBookModal({
 
                       {activeHoverPoint && chartGeometry && (
                         <div
-                          className="absolute top-2 pointer-events-none z-20 p-2.5 rounded-xl bg-[#1e160e]/95 border border-amber-500/40 shadow-xl text-xs space-y-1 backdrop-blur-sm"
+                          className="absolute top-2 pointer-events-none z-20 p-3 rounded-xl bg-[#19120b]/95 border border-amber-500/45 shadow-2xl text-xs space-y-1.5 backdrop-blur-md min-w-[215px]"
                           style={{
                             left: Math.min(
-                              chartGeometry.width - 230,
-                              Math.max(10, chartGeometry.getX(hoveredIndex!) - 95)
+                              chartGeometry.width - 235,
+                              Math.max(10, chartGeometry.getX(hoveredIndex!) - 100)
                             ),
                           }}
                         >
-                          <div className="font-bold text-amber-100 flex items-center justify-between gap-4">
+                          <div className="font-bold text-amber-100 flex items-center justify-between gap-3">
                             <span>{activeHoverPoint.fullDateLabel}</span>
                             {activeHoverPoint.isRealSale && (
-                              <span className="text-[9px] px-1.5 py-0.2 rounded bg-emerald-950 text-emerald-400 border border-emerald-500/40">
-                                Verified Sale
+                              <span className="text-[9px] px-1.5 py-0.5 rounded bg-emerald-950 text-emerald-400 border border-emerald-500/40">
+                                Verified
                               </span>
                             )}
                           </div>
-                          <div className="grid grid-cols-2 gap-x-3 gap-y-0.5 text-[11px] pt-1">
-                            {showSales && (
-                              <>
-                                <div className="text-amber-200/70">Sale Price:</div>
-                                <div className="font-bold text-amber-300 font-mono text-right">
-                                  {activeHoverPoint.salePrice.toFixed(4)} FLOWER
-                                </div>
-                              </>
-                            )}
-
+                          {/* OHLC Strip inside Hover Card */}
+                          <div className="grid grid-cols-4 gap-1 text-[10px] font-mono bg-black/40 px-2 py-1 rounded-lg border border-white/5">
+                            <div>
+                              <span className="text-amber-200/50">O </span>
+                              <span className="text-amber-100 font-bold">{activeHoverPoint.open.toFixed(4)}</span>
+                            </div>
+                            <div>
+                              <span className="text-emerald-400/70">H </span>
+                              <span className="text-emerald-300 font-bold">{activeHoverPoint.high.toFixed(4)}</span>
+                            </div>
+                            <div>
+                              <span className="text-rose-400/70">L </span>
+                              <span className="text-rose-300 font-bold">{activeHoverPoint.low.toFixed(4)}</span>
+                            </div>
+                            <div>
+                              <span className="text-amber-300/70">C </span>
+                              <span className="text-amber-200 font-bold">{activeHoverPoint.close.toFixed(4)}</span>
+                            </div>
+                          </div>
+                          <div className="grid grid-cols-2 gap-x-3 gap-y-0.5 text-[11px] pt-0.5">
                             {showAsks && (
                               <>
                                 <div className="text-amber-200/70">Floor Ask:</div>
                                 <div className="font-bold text-rose-300 font-mono text-right">
-                                  {activeHoverPoint.floorAsk.toFixed(4)} FLOWER
+                                  {activeHoverPoint.floorAsk.toFixed(4)} F
                                 </div>
                               </>
                             )}
-
                             {showBids && (
                               <>
                                 <div className="text-amber-200/70">Best Bid:</div>
                                 <div className="font-bold text-cyan-300 font-mono text-right">
-                                  {activeHoverPoint.bestBid.toFixed(4)} FLOWER
+                                  {activeHoverPoint.bestBid.toFixed(4)} F
                                 </div>
                               </>
                             )}
-
                             {showVwap && (
                               <>
                                 <div className="text-amber-200/70">VWAP:</div>
                                 <div className="font-bold text-fuchsia-300 font-mono text-right">
-                                  {activeHoverPoint.vwap.toFixed(4)} FLOWER
+                                  {activeHoverPoint.vwap.toFixed(4)} F
                                 </div>
                               </>
                             )}
-
+                            {showEma && (
+                              <>
+                                <div className="text-amber-200/70">EMA-7:</div>
+                                <div className="font-bold text-lime-300 font-mono text-right">
+                                  {activeHoverPoint.ema.toFixed(4)} F
+                                </div>
+                              </>
+                            )}
                             {showMovingAverage && (
                               <>
-                                <div className="text-amber-200/70">Moving Avg (5P):</div>
+                                <div className="text-amber-200/70">SMA-5:</div>
                                 <div className="font-bold text-emerald-300 font-mono text-right">
-                                  {activeHoverPoint.movingAverage.toFixed(4)} FLOWER
+                                  {activeHoverPoint.movingAverage.toFixed(4)} F
                                 </div>
                               </>
                             )}
-
-                            {showSupportResistance && (
-                              <>
-                                <div className="text-amber-200/70">Sup / Res:</div>
-                                <div className="font-bold text-orange-300 font-mono text-right">
-                                  {supportLevelFlower.toFixed(4)} / {resistanceLevelFlower.toFixed(4)}
-                                </div>
-                              </>
-                            )}
-
                             {showPressureOverlay && activeHoverPointMpi && (
                               <>
                                 <div className="text-amber-200/70">Pressure (MPI):</div>
@@ -4206,35 +4740,60 @@ export default function TradeableOrderBookModal({
                                 </div>
                               </>
                             )}
-
                             {showVolumeOverlay && (
                               <>
                                 <div className="text-amber-200/70">Volume:</div>
                                 <div className="font-bold text-teal-300 font-mono text-right">
-                                  {activeHoverPoint.volume.toFixed(2)} F ({activeHoverPoint.tradeCount} trades)
+                                  {activeHoverPoint.volume.toFixed(2)} F ({activeHoverPoint.tradeCount})
                                 </div>
                               </>
                             )}
-
                             <div className="text-amber-200/70">USD Equiv:</div>
                             <div className="font-bold text-emerald-400 font-mono text-right">
-                              ≈ ${(activeHoverPoint.salePrice * flowerPriceUSD).toFixed(4)}
+                              ≈ ${(activeHoverPoint.close * flowerPriceUSD).toFixed(4)}
                             </div>
                           </div>
-                          <div className="text-[9px] text-amber-200/40 pt-0.5 border-t border-amber-900/30">
+                          <div className="text-[9px] text-amber-200/45 pt-0.5 border-t border-amber-900/30">
                             Source: {activeHoverPoint.source}
                           </div>
                         </div>
                       )}
                     </div>
 
+                    {/* Past Trade Window Decision Card (Buy vs Hold Recommendation) */}
+                    {windowAnalytics && (
+                      <div className="p-4 rounded-2xl bg-gradient-to-br from-[#19130b] to-[#110c07] border border-amber-500/25 space-y-2.5">
+                        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                          <div className="flex items-center gap-2">
+                            <Compass className="w-4 h-4 text-amber-400 shrink-0" />
+                            <span className="text-xs font-black text-amber-100 uppercase tracking-wider">
+                              Past {timeframe} Trade Decision ({itemName})
+                            </span>
+                          </div>
+                          <span className={`text-[11px] font-mono font-black px-3 py-1 rounded-full border self-start sm:self-auto ${windowAnalytics.decisionColor}`}>
+                            Verdict: {windowAnalytics.decision}
+                          </span>
+                        </div>
+                        <ul className="space-y-1 text-xs text-amber-100/85">
+                          {windowAnalytics.decisionBullets.map((b, bIdx) => (
+                            <li key={bIdx} className="flex items-start gap-2">
+                              <span className="text-amber-400 font-bold mt-0.5">•</span>
+                              <span>{b}</span>
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+
                     <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-[11px] text-amber-200/60 pt-1">
                       <div className="flex items-center gap-1.5">
                         <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
-                        <span>Data Coverage: 7 Days Verified • Direct Sunflower Land API (`type=tradeable`)</span>
+                        <span>
+                          Real Data Fusion: SFL Settled Trades ({sales.length}) + Stored Snapshots ({storedSnapshots.length}) + Daily OHLC ({Object.keys(dailyHistory).length}d)
+                        </span>
                       </div>
                       <div className="font-mono text-amber-400/80">
-                        Hover chart points for exact price, overlays & timestamp
+                        Hover candles for exact OHLC, VWAP &amp; EMA-7
                       </div>
                     </div>
                   </div>

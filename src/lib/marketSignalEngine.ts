@@ -335,7 +335,7 @@ export interface SmartTradingSignals {
   multiTimeframe: MultiTimeframeAnalysisSummary;
 }
 
-export type SignalTimeframe = '1H' | '4H' | '1D' | '7D' | '1M';
+export type SignalTimeframe = '1H' | '4H' | '6H' | '12H' | '1D' | '3D' | '7D' | '1M';
 
 export type MultiTimeframeAlignment =
   | 'Aligned Bullish'
@@ -2001,6 +2001,90 @@ export function calculateMultiTimeframeSignals(
     };
   })();
 
+  // --- 6H Evaluation ---
+  const m6h = calcWindowTradeMetrics(6 * 60 * 60 * 1000);
+  const e6h: TimeframeSignalEntry = (() => {
+    if (bookSparse) {
+      return {
+        timeframe: '6H',
+        horizonLabel: 'Quarter-Day (6H)',
+        signal: 'Insufficient Data',
+        score: null,
+        confidence: 'N/A',
+        interpretation: 'Order book too sparse for 6H read',
+        trendPercent: 0,
+        sampleCount: m6h.count,
+        sampleUnit: 'trades',
+      };
+    }
+    const takerScore = m6h.count >= 2 ? 50 + (m6h.buyerTakerPct - 50) * 0.9 : 50;
+    const slopeScore = m6h.count >= 2 ? 50 + m6h.trendPct * 7.2 : 50;
+    const score6h = clamp(bookComponent * 0.40 + takerScore * 0.30 + slopeScore * 0.30);
+    const sig6h = classifyScoreToSignal(score6h);
+    const conf6h: SignalConfidence = m6h.count >= 4 ? 'High' : m6h.count >= 2 ? 'Medium' : 'Low';
+    const interp6h =
+      sig6h === 'Strong Buy' || sig6h === 'Buy'
+        ? '6H accumulation building'
+        : sig6h === 'Strong Sell' || sig6h === 'Sell'
+        ? '6H selling pressure building'
+        : m6h.count < 2
+        ? 'Limited 6H trade sample'
+        : '6H range equilibrium';
+    return {
+      timeframe: '6H',
+      horizonLabel: 'Quarter-Day (6H)',
+      signal: sig6h,
+      score: score6h,
+      confidence: conf6h,
+      interpretation: interp6h,
+      trendPercent: m6h.trendPct,
+      sampleCount: m6h.count,
+      sampleUnit: 'trades',
+    };
+  })();
+
+  // --- 12H Evaluation ---
+  const m12h = calcWindowTradeMetrics(12 * 60 * 60 * 1000);
+  const e12h: TimeframeSignalEntry = (() => {
+    if (bookSparse) {
+      return {
+        timeframe: '12H',
+        horizonLabel: 'Half-Day (12H)',
+        signal: 'Insufficient Data',
+        score: null,
+        confidence: 'N/A',
+        interpretation: 'Order book too sparse for 12H read',
+        trendPercent: 0,
+        sampleCount: m12h.count,
+        sampleUnit: 'trades',
+      };
+    }
+    const takerScore = m12h.count >= 2 ? 50 + (m12h.buyerTakerPct - 50) * 0.9 : 50;
+    const slopeScore = m12h.count >= 2 ? 50 + m12h.trendPct * 6.8 : 50;
+    const score12h = clamp(bookComponent * 0.36 + takerScore * 0.32 + slopeScore * 0.32);
+    const sig12h = classifyScoreToSignal(score12h);
+    const conf12h: SignalConfidence = m12h.count >= 5 ? 'High' : m12h.count >= 2 ? 'Medium' : 'Low';
+    const interp12h =
+      sig12h === 'Strong Buy' || sig12h === 'Buy'
+        ? '12H upward session drift'
+        : sig12h === 'Strong Sell' || sig12h === 'Sell'
+        ? '12H downward supply pressure'
+        : m12h.count < 2
+        ? 'Limited 12H trade sample'
+        : '12H balanced session';
+    return {
+      timeframe: '12H',
+      horizonLabel: 'Half-Day (12H)',
+      signal: sig12h,
+      score: score12h,
+      confidence: conf12h,
+      interpretation: interp12h,
+      trendPercent: m12h.trendPct,
+      sampleCount: m12h.count,
+      sampleUnit: 'trades',
+    };
+  })();
+
   // --- 1D Evaluation ---
   const m1dTrades = calcWindowTradeMetrics(24 * 60 * 60 * 1000);
   const m1dDaily = calcDailyWindowMetrics(2);
@@ -2040,6 +2124,49 @@ export function calculateMultiTimeframeSignals(
       trendPercent: activeSlope,
       sampleCount: m1dTrades.count > 0 ? m1dTrades.count : m1dDaily.count,
       sampleUnit: m1dTrades.count > 0 ? 'trades' : 'days',
+    };
+  })();
+
+  // --- 3D Evaluation ---
+  const m3dDaily = calcDailyWindowMetrics(4);
+  const m3dTrades = calcWindowTradeMetrics(3 * 24 * 60 * 60 * 1000);
+  const e3d: TimeframeSignalEntry = (() => {
+    if (m3dDaily.count < 2 && m3dTrades.count < 3 && bookSparse) {
+      return {
+        timeframe: '3D',
+        horizonLabel: 'Multi-Day (3D)',
+        signal: 'Insufficient Data',
+        score: null,
+        confidence: 'N/A',
+        interpretation: 'Need 2+ daily sessions for 3D trend',
+        trendPercent: 0,
+        sampleCount: m3dDaily.count,
+        sampleUnit: 'days',
+      };
+    }
+    const trendPct3d = m3dDaily.count >= 2 ? m3dDaily.trendPct : m3dTrades.trendPct;
+    const slopeScore3d = 50 + trendPct3d * 4.8 + (m3dDaily.rangePos - 0.5) * 16;
+    const score3d = clamp(slopeScore3d * 0.68 + bookComponent * 0.32);
+    const sig3d = classifyScoreToSignal(score3d);
+    const conf3d: SignalConfidence = m3dDaily.count >= 3 ? 'High' : m3dDaily.count >= 2 ? 'Medium' : 'Low';
+    const interp3d =
+      sig3d === 'Strong Buy' || sig3d === 'Buy'
+        ? '3-day recovery / accumulation wave'
+        : sig3d === 'Strong Sell' || sig3d === 'Sell'
+        ? '3-day distribution slide'
+        : m3dDaily.count < 2
+        ? 'Limited 3D session history'
+        : '3-day sideways consolidation';
+    return {
+      timeframe: '3D',
+      horizonLabel: 'Multi-Day (3D)',
+      signal: sig3d,
+      score: score3d,
+      confidence: conf3d,
+      interpretation: interp3d,
+      trendPercent: trendPct3d,
+      sampleCount: m3dDaily.count > 0 ? m3dDaily.count : m3dTrades.count,
+      sampleUnit: m3dDaily.count > 0 ? 'days' : 'trades',
     };
   })();
 
@@ -2128,7 +2255,7 @@ export function calculateMultiTimeframeSignals(
     };
   })();
 
-  const entries: TimeframeSignalEntry[] = [e1h, e4h, e1d, e7d, e1m];
+  const entries: TimeframeSignalEntry[] = [e1h, e4h, e6h, e12h, e1d, e3d, e7d, e1m];
   const validEntries = entries.filter(e => e.signal !== 'Insufficient Data');
 
   const isBull = (s: SixStateSignal) => s === 'Strong Buy' || s === 'Buy';
@@ -2138,31 +2265,31 @@ export function calculateMultiTimeframeSignals(
   const bearishCount = validEntries.filter(e => isBear(e.signal)).length;
   const neutralCount = validEntries.filter(e => e.signal === 'Neutral').length;
 
-  const shortBullish = isBull(e1h.signal) || isBull(e4h.signal);
-  const shortBearish = isBear(e1h.signal) || isBear(e4h.signal);
-  const longBearish = isBear(e1m.signal) || isBear(e7d.signal);
-  const longBullish = isBull(e1m.signal) || isBull(e7d.signal);
+  const shortBullish = isBull(e1h.signal) || isBull(e4h.signal) || isBull(e6h.signal);
+  const shortBearish = isBear(e1h.signal) || isBear(e4h.signal) || isBear(e6h.signal);
+  const longBearish = isBear(e1m.signal) || isBear(e7d.signal) || isBear(e3d.signal);
+  const longBullish = isBull(e1m.signal) || isBull(e7d.signal) || isBull(e3d.signal);
 
   let alignment: MultiTimeframeAlignment = 'Range-Bound / Neutral';
   let headline = 'Neutral equilibrium across intervals';
   let summary = 'Short-term and longer-term intervals show no decisive directional dominance.';
-  let recommendation = 'Wait for a breakout backed by aligned 4H and 1D confirmation before taking directional size.';
+  let recommendation = 'Wait for a breakout backed by aligned 4H, 12H, and 1D confirmation before taking directional size.';
 
   if (validEntries.length < 2) {
     alignment = 'Insufficient Data';
     headline = 'Insufficient multi-timeframe history';
     summary = 'Not enough active order-book or multi-day historical data to compare timeframes reliably.';
     recommendation = 'Use limit orders near verified depth levels until multi-day trade history builds.';
-  } else if (bullishCount >= 4 || (bullishCount >= 3 && bearishCount === 0 && !longBearish)) {
+  } else if (bullishCount >= 5 || (bullishCount >= 4 && bearishCount === 0 && !longBearish)) {
     alignment = 'Aligned Bullish';
     headline = 'Timeframes aligned bullish';
-    summary = `${bullishCount} of ${validEntries.length} intervals register Buy or Strong Buy, with short-term buyers supported by positive higher-timeframe structure.`;
-    recommendation = 'Trend alignment favors pullback entries near support while 1D and 4H hold constructive.';
-  } else if (bearishCount >= 4 || (bearishCount >= 3 && bullishCount === 0 && !longBullish)) {
+    summary = `${bullishCount} of ${validEntries.length} intervals register Buy or Strong Buy, with short-term buyers supported by positive 3D/7D structure.`;
+    recommendation = 'Trend alignment favors pullback entries near support while 1D, 3D, and 7D hold constructive.';
+  } else if (bearishCount >= 5 || (bearishCount >= 4 && bullishCount === 0 && !longBullish)) {
     alignment = 'Aligned Bearish';
     headline = 'Timeframes aligned bearish';
-    summary = `${bearishCount} of ${validEntries.length} intervals register Sell or Strong Sell, confirming persistent supply pressure across short and long windows.`;
-    recommendation = 'Avoid catching falling prices aggressively; wait for 1H and 4H momentum to stabilize first.';
+    summary = `${bearishCount} of ${validEntries.length} intervals register Sell or Strong Sell, confirming persistent supply pressure across intraday and multi-day windows.`;
+    recommendation = 'Avoid catching falling prices aggressively; wait for 4H, 6H, and 12H momentum to stabilize first.';
   } else if (shortBullish && longBearish) {
     alignment = 'Mixed Signals';
     headline = 'Mixed signals';

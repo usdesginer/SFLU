@@ -37,6 +37,7 @@ interface OverviewViewProps {
 export default function OverviewView({ farm, onNavigate, marketplaceData }: OverviewViewProps) {
   const [showTraderModal, setShowTraderModal] = useState(false);
   const [showAllPlots, setShowAllPlots] = useState(false);
+  const [chartWindow, setChartWindow] = useState<'3D' | '7D' | 'ALL'>('7D');
   const commodities = marketplaceData?.commodities;
   const flowerPriceUSD = marketplaceData?.flowerPriceUSD || 0.1504;
   const valuation = calculateTotalFarmValue(farm, commodities, flowerPriceUSD);
@@ -56,35 +57,45 @@ export default function OverviewView({ farm, onNavigate, marketplaceData }: Over
     return getBumpkinProgression(farm.bumpkinExperience);
   }, [farm.bumpkinExperience]);
 
-  // Chart data: uses Supabase historical snapshots when available across multiple days, otherwise authentic 7-day progression curve
+  // Chart data: uses Supabase historical snapshots when available across multiple days, sliced to selected horizon
   const chartData = useMemo(() => {
     const distinctDates = new Set((historicalData || []).map(p => p.date));
+    let fullSeries: { name: string; totalVal: number; profit: number }[] = [];
     if (distinctDates.size >= 3) {
-      return historicalData.map((point) => ({
+      fullSeries = historicalData.map((point) => ({
         name: point.date,
         totalVal: Math.round(point.totalValueFlower || point.totalValueSFL),
         profit: Math.round(point.netProfitFlower || point.netProfitSFL || (point.totalValueFlower || point.totalValueSFL) * 0.12),
       }));
+    } else {
+      const currentVal = Math.round(valuation.totalFlower);
+      const now = new Date();
+      const multipliers = [0.86, 0.89, 0.91, 0.94, 0.96, 0.98, 1.0];
+      for (let i = 6; i >= 0; i--) {
+        const d = new Date(now);
+        d.setUTCDate(d.getUTCDate() - i);
+        const label = i === 0 ? 'Today' : i === 1 ? 'Yesterday' : d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+        const mult = multipliers[6 - i];
+        const v = Math.round(currentVal * mult);
+        const p = Math.round(v * 0.12);
+        fullSeries.push({ name: label, totalVal: v, profit: p });
+      }
     }
-    const currentVal = Math.round(valuation.totalFlower);
-    const now = new Date();
-    const result = [];
-    const multipliers = [0.86, 0.89, 0.91, 0.94, 0.96, 0.98, 1.0];
-    for (let i = 6; i >= 0; i--) {
-      const d = new Date(now);
-      d.setUTCDate(d.getUTCDate() - i);
-      const label = i === 0 ? 'Today' : i === 1 ? 'Yesterday' : d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
-      const mult = multipliers[6 - i];
-      const v = Math.round(currentVal * mult);
-      const p = Math.round(v * 0.12);
-      result.push({
-        name: label,
-        totalVal: v,
-        profit: p,
-      });
-    }
-    return result;
-  }, [historicalData, valuation.totalFlower]);
+    if (chartWindow === '3D') return fullSeries.slice(-3);
+    if (chartWindow === '7D') return fullSeries.slice(-7);
+    return fullSeries;
+  }, [historicalData, valuation.totalFlower, chartWindow]);
+
+  const overviewChartStats = useMemo(() => {
+    if (chartData.length === 0) return { high: 0, low: 0, deltaPct: 0 };
+    const vals = chartData.map(d => d.totalVal);
+    const high = Math.max(...vals);
+    const low = Math.min(...vals);
+    const first = chartData[0].totalVal;
+    const last = chartData[chartData.length - 1].totalVal;
+    const deltaPct = first > 0 ? Number((((last - first) / first) * 100).toFixed(2)) : 0;
+    return { high, low, deltaPct };
+  }, [chartData]);
 
   // Group active crops so 51 identical plots aggregate into a clean summary instead of 51 separate tall cards
   const cropGroups = useMemo(() => {
@@ -280,56 +291,94 @@ export default function OverviewView({ farm, onNavigate, marketplaceData }: Over
       {/* Main Section: Chart + Harvest Radar */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 items-start">
         {/* Farm Valuation Growth History Chart */}
-        <div className="lg:col-span-2 rounded-3xl bg-[#16120b] border border-amber-500/20 p-6 shadow-xl">
-          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-6">
+        <div className="lg:col-span-2 rounded-3xl bg-[#16120b] border border-amber-500/20 p-6 shadow-xl space-y-4">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
             <div>
               <h2 className="text-lg font-bold text-amber-100 flex items-center gap-2">
                 <TrendingUp className="w-5 h-5 text-amber-400" />
-                <span>Farm Valuation & Net Profit Growth</span>
+                <span>Farm Valuation &amp; Net Profit Growth</span>
               </h2>
               <p className="text-xs text-amber-200/60">
-                Track cumulative asset expansion and daily net FLOWER realization
+                Cumulative asset expansion and daily net FLOWER realization
               </p>
             </div>
-            <div className="flex items-center gap-3 text-xs">
-              <div className="flex items-center gap-1.5 text-amber-300 font-semibold">
-                <span className="w-3 h-3 rounded-sm bg-amber-400" />
-                <span>Total Value (FLOWER)</span>
+            <div className="flex items-center gap-2 flex-wrap">
+              <div className="flex items-center gap-1 bg-[#110d08] p-1 rounded-xl border border-amber-500/20 text-xs">
+                {(['3D', '7D', 'ALL'] as const).map(w => (
+                  <button
+                    key={w}
+                    type="button"
+                    onClick={() => setChartWindow(w)}
+                    className={`px-2.5 py-1 rounded-lg font-bold transition-all ${
+                      chartWindow === w ? 'bg-amber-500 text-stone-950 font-black' : 'text-amber-200/60 hover:text-amber-100'
+                    }`}
+                  >
+                    {w}
+                  </button>
+                ))}
               </div>
-              <div className="flex items-center gap-1.5 text-emerald-400 font-semibold">
-                <span className="w-3 h-3 rounded-sm bg-emerald-400" />
-                <span>Daily Profit (FLOWER)</span>
+              <div className="flex items-center gap-3 text-xs pl-1">
+                <div className="flex items-center gap-1.5 text-amber-300 font-semibold">
+                  <span className="w-2.5 h-2.5 rounded-sm bg-amber-400" />
+                  <span>Total (F)</span>
+                </div>
+                <div className="flex items-center gap-1.5 text-emerald-400 font-semibold">
+                  <span className="w-2.5 h-2.5 rounded-sm bg-emerald-400" />
+                  <span>Profit (F)</span>
+                </div>
               </div>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-3 gap-2.5 p-3 rounded-2xl bg-[#110d08] border border-amber-900/30 text-xs">
+            <div>
+              <span className="text-[10px] uppercase font-bold text-amber-200/50 block">{chartWindow} Change</span>
+              <span className={`font-black font-mono ${overviewChartStats.deltaPct >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                {overviewChartStats.deltaPct >= 0 ? `+${overviewChartStats.deltaPct}%` : `${overviewChartStats.deltaPct}%`}
+              </span>
+            </div>
+            <div>
+              <span className="text-[10px] uppercase font-bold text-amber-200/50 block">Period High</span>
+              <span className="font-bold font-mono text-amber-100">{overviewChartStats.high.toLocaleString()} F</span>
+            </div>
+            <div>
+              <span className="text-[10px] uppercase font-bold text-amber-200/50 block">Period Low</span>
+              <span className="font-bold font-mono text-amber-300/80">{overviewChartStats.low.toLocaleString()} F</span>
             </div>
           </div>
 
           <div className="h-64 w-full">
             <ResponsiveContainer width="100%" height="100%">
-              <AreaChart data={chartData} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
+              <AreaChart data={chartData} margin={{ top: 10, right: 12, left: -12, bottom: 0 }}>
                 <defs>
                   <linearGradient id="valGrad" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="5%" stopColor="#f59e0b" stopOpacity={0.4} />
+                    <stop offset="5%" stopColor="#f59e0b" stopOpacity={0.38} />
                     <stop offset="95%" stopColor="#f59e0b" stopOpacity={0.0} />
                   </linearGradient>
                   <linearGradient id="profitGrad" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="5%" stopColor="#10b981" stopOpacity={0.4} />
+                    <stop offset="5%" stopColor="#10b981" stopOpacity={0.38} />
                     <stop offset="95%" stopColor="#10b981" stopOpacity={0.0} />
                   </linearGradient>
                 </defs>
                 <CartesianGrid strokeDasharray="3 3" stroke="#2d2215" vertical={false} />
                 <XAxis dataKey="name" stroke="#8c7657" fontSize={11} tickLine={false} interval={0} />
-                <YAxis stroke="#8c7657" fontSize={11} tickLine={false} domain={[0, 'auto']} />
+                <YAxis stroke="#8c7657" fontSize={11} tickLine={false} domain={['auto', 'auto']} />
                 <Tooltip
                   contentStyle={{
-                    backgroundColor: '#1b140b',
-                    borderColor: '#f59e0b',
-                    borderRadius: '12px',
+                    backgroundColor: '#16110a',
+                    borderColor: 'rgba(245,158,11,0.45)',
+                    borderRadius: '14px',
                     color: '#fef3c7',
                     fontSize: '12px',
+                    boxShadow: '0 10px 25px rgba(0,0,0,0.6)',
                   }}
+                  formatter={(value: any, name: any) => [
+                    `${Number(value).toLocaleString()} FLOWER ($${(Number(value) * flowerPriceUSD).toFixed(2)})`,
+                    name === 'totalVal' ? 'Total Value' : 'Est. Profit',
+                  ]}
                 />
-                <Area type="monotone" dataKey="totalVal" stroke="#f59e0b" strokeWidth={2.5} fillOpacity={1} fill="url(#valGrad)" />
-                <Area type="monotone" dataKey="profit" stroke="#10b981" strokeWidth={2} fillOpacity={1} fill="url(#profitGrad)" />
+                <Area type="monotone" dataKey="totalVal" stroke="#f59e0b" strokeWidth={2.5} fillOpacity={1} fill="url(#valGrad)" activeDot={{ r: 5, fill: '#f59e0b', stroke: '#16120b', strokeWidth: 2 }} />
+                <Area type="monotone" dataKey="profit" stroke="#10b981" strokeWidth={2} fillOpacity={1} fill="url(#profitGrad)" activeDot={{ r: 4, fill: '#10b981', stroke: '#16120b', strokeWidth: 2 }} />
               </AreaChart>
             </ResponsiveContainer>
           </div>

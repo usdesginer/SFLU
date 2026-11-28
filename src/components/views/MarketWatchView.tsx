@@ -65,7 +65,13 @@ export default function MarketWatchView({ marketplaceData: initialMarketData, fa
   const [activeTab, setActiveTab] = useState<MainTab>('pulse');
   const [timeWindow, setTimeWindow] = useState<TimeWindow>('24h');
   const [showAddModal, setShowAddModal] = useState(false);
-  const [selectedTradeable, setSelectedTradeable] = useState<{ id: number; name: string; icon: string; collection?: string } | null>(null);
+  const [selectedTradeable, setSelectedTradeable] = useState<{
+    id: number;
+    name: string;
+    icon: string;
+    collection?: string;
+    initialTab?: 'depth' | 'signals' | 'overview' | 'orderbook' | 'sales' | 'analytics';
+  } | null>(null);
   
   // Alert form state
   const [newItemId, setNewItemId] = useState('wheat');
@@ -815,19 +821,37 @@ export default function MarketWatchView({ marketplaceData: initialMarketData, fa
                             <td className="py-3 px-4 sm:px-6 text-right">
                               <div className="flex items-center justify-end gap-1.5">
                                 {ITEM_NUMERIC_ID_MAP[item.id] && (
-                                  <button
-                                    onClick={() => {
-                                      setSelectedTradeable({
-                                        id: ITEM_NUMERIC_ID_MAP[item.id],
-                                        name: item.name,
-                                        icon: item.icon,
-                                        collection: 'collectibles',
-                                      });
-                                    }}
-                                    className="px-2.5 py-1 rounded-lg bg-amber-500/10 hover:bg-amber-500/20 text-amber-300 hover:text-amber-100 border border-amber-500/30 text-[11px] font-semibold transition-colors flex items-center gap-1"
-                                  >
-                                    <span>📖 Book</span>
-                                  </button>
+                                  <>
+                                    <button
+                                      onClick={() => {
+                                        setSelectedTradeable({
+                                          id: ITEM_NUMERIC_ID_MAP[item.id],
+                                          name: item.name,
+                                          icon: item.icon,
+                                          collection: 'collectibles',
+                                          initialTab: 'overview',
+                                        });
+                                      }}
+                                      className="px-2.5 py-1 rounded-lg bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-300 hover:text-emerald-100 border border-emerald-500/35 text-[11px] font-bold transition-colors flex items-center gap-1"
+                                      title="Open Pro Trading Chart (4H / 6H / 12H / 1D / 3D / 7D)"
+                                    >
+                                      <span>📈 Chart</span>
+                                    </button>
+                                    <button
+                                      onClick={() => {
+                                        setSelectedTradeable({
+                                          id: ITEM_NUMERIC_ID_MAP[item.id],
+                                          name: item.name,
+                                          icon: item.icon,
+                                          collection: 'collectibles',
+                                          initialTab: 'depth',
+                                        });
+                                      }}
+                                      className="px-2.5 py-1 rounded-lg bg-amber-500/10 hover:bg-amber-500/20 text-amber-300 hover:text-amber-100 border border-amber-500/30 text-[11px] font-semibold transition-colors flex items-center gap-1"
+                                    >
+                                      <span>📖 Book</span>
+                                    </button>
+                                  </>
                                 )}
                                 <button
                                   onClick={() => {
@@ -1512,6 +1536,7 @@ export default function MarketWatchView({ marketplaceData: initialMarketData, fa
           collection={selectedTradeable.collection || 'collectibles'}
           flowerPriceUSD={flowerPriceUSD}
           farm={farm}
+          initialTab={selectedTradeable.initialTab}
           onClose={() => setSelectedTradeable(null)}
         />
       )}

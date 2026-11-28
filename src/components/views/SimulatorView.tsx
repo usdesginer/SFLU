@@ -13,7 +13,7 @@ import {
   Sliders,
   RotateCcw
 } from 'lucide-react';
-import { ResponsiveContainer, AreaChart, Area, XAxis, YAxis, Tooltip, CartesianGrid } from 'recharts';
+import { ResponsiveContainer, AreaChart, Area, XAxis, YAxis, Tooltip, CartesianGrid, ReferenceLine } from 'recharts';
 import { FarmState } from '../../types';
 import { simulateStrategy } from '../../lib/profitEngine';
 import { SFL_TOKEN_PRICE_USD } from '../../data/sflData';
@@ -228,7 +228,7 @@ export default function SimulatorView({ farm, onNavigate }: SimulatorViewProps) 
 
             <div className="h-56 w-full">
               <ResponsiveContainer width="100%" height="100%">
-                <AreaChart data={simulation.timelineData} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
+                <AreaChart data={simulation.timelineData} margin={{ top: 10, right: 12, left: -12, bottom: 0 }}>
                   <defs>
                     <linearGradient id="simProfitGrad" x1="0" y1="0" x2="0" y2="1">
                       <stop offset="5%" stopColor="#10b981" stopOpacity={0.4} />
@@ -238,17 +238,23 @@ export default function SimulatorView({ farm, onNavigate }: SimulatorViewProps) 
                   <CartesianGrid strokeDasharray="3 3" stroke="#2d2215" vertical={false} />
                   <XAxis dataKey="day" stroke="#8c7657" fontSize={11} tickLine={false} />
                   <YAxis stroke="#8c7657" fontSize={11} tickLine={false} />
+                  <ReferenceLine y={0} stroke="#57432a" strokeDasharray="3 3" />
                   <Tooltip
                     contentStyle={{
-                      backgroundColor: '#1b140b',
-                      borderColor: '#10b981',
-                      borderRadius: '12px',
+                      backgroundColor: '#16110a',
+                      borderColor: 'rgba(16,185,129,0.5)',
+                      borderRadius: '14px',
                       color: '#fef3c7',
                       fontSize: '12px',
+                      boxShadow: '0 10px 25px rgba(0,0,0,0.6)',
                     }}
+                    formatter={(value: any, name: any) => [
+                      `${Number(value).toLocaleString()} FLOWER ($${(Number(value) * SFL_TOKEN_PRICE_USD).toFixed(2)})`,
+                      name === 'netProfit' ? 'Cumulative Net Profit' : 'Capital Invested',
+                    ]}
                   />
-                  <Area type="monotone" dataKey="netProfit" stroke="#10b981" strokeWidth={2.5} fillOpacity={1} fill="url(#simProfitGrad)" />
-                  <Area type="monotone" dataKey="invested" stroke="#f59e0b" strokeWidth={1.5} fillOpacity={0} />
+                  <Area type="monotone" dataKey="netProfit" stroke="#10b981" strokeWidth={2.5} fillOpacity={1} fill="url(#simProfitGrad)" activeDot={{ r: 5, fill: '#10b981', stroke: '#16120b', strokeWidth: 2 }} />
+                  <Area type="monotone" dataKey="invested" stroke="#f59e0b" strokeWidth={1.6} strokeDasharray="4 3" fillOpacity={0} activeDot={{ r: 4, fill: '#f59e0b' }} />
                 </AreaChart>
               </ResponsiveContainer>
             </div>
